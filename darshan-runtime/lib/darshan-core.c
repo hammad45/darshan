@@ -31,11 +31,13 @@
 #include <sys/stat.h>
 #include <sys/mman.h>
 #include <sys/vfs.h>
+#include <sys/wait.h>
 #include <ctype.h>
 #include <regex.h>
 #include <zlib.h>
 #include <errno.h>
 #include <assert.h>
+#include <spawn.h>
 
 #ifdef HAVE_MPI
 #include <mpi.h>
@@ -754,31 +756,86 @@ void darshan_core_shutdown(int write_log)
                     char *line = NULL;     
                     size_t len = 0;
 
-                    sprintf(cmd, "addr2line -a %s -e %s", d->address, exe_name);     
+                    sprintf(cmd, "/bin/addr2line -a %s -e %s", d->address, exe_name);     
                     //printf("CMD: %s", cmd);           
-                    fp = popen(cmd, "r");                                                                            
+                    if (false) {
+                        fp = popen(cmd, "r");                                                                            
 
-                    while (getline(&line, &len, fp) != -1)
-                    //while (fgets(line, sizeof line, fp))
-                    {
-                        //printf("--> [%s]\n", line);
-                        if (strstr(line, "0x") == NULL && strstr(line, "(nil)") == NULL && strstr(line, "(null)") == NULL) {
-                            if (strstr(line, "??") == NULL) {
-                                sprintf(cmd, "%p, %s", d->address, line);
+                        while (getline(&line, &len, fp) != -1)
+                        //while (fgets(line, sizeof line, fp))
+                        {
+                            //printf("--> [%s]\n", line);
+                            if (strstr(line, "0x") == NULL && strstr(line, "(nil)") == NULL && strstr(line, "(null)") == NULL) {
+                                if (strstr(line, "??") == NULL) {
+                                    sprintf(cmd, "%p, %s", d->address, line);
+                                    
+                                    //address_line_mapping = (char *)calloc(strlen(address_line_mapping) + strlen(cmd) + 1, sizeof(char));
+                                    //strcat(address_line_mapping, address_line_mapping_cur);
+                                    strcat(address_line_mapping, cmd);
+                                    //address_line_mapping_cur = address_line_mapping;
+
+                                    //funcionou
+                                    //printf("~~~~ <%s>\n", line);
+                                    //sprintf(&final_core->log_hdr_p->posix_line_mapping[line_mappings_index++], "%s, %s", d->address, line);
+
+                                    //final_core->log_hdr_p->posix_line_mapping[line_mappings_index++] = *address_line_mapping;
+                                }
+                            }
+                        }
+                    }
+
+                    char addr[32];
+                    sprintf(addr, "%s", d->address);    
+
+                    char *const args[] = { "/bin/addr2line", "-a", addr, "-e", exe_name, NULL };
+
+                    int pipe_fd[2];
+                    pid_t child_pid;
+                    int status;
+
+                    // Create a pipe to capture the command's output
+                    if (pipe(pipe_fd) == -1) {
+                        perror("pipe");
+                        // return 1;
+                    }
+
+                    // Use posix_spawn to execute the command
+                    posix_spawn_file_actions_t action;
+                    posix_spawn_file_actions_init(&action);
+                    posix_spawn_file_actions_addclose(&action, pipe_fd[0]); // Close the read end of the pipe
+                    posix_spawn_file_actions_adddup2(&action, pipe_fd[1], STDOUT_FILENO); // Redirect stdout to the write end of the pipe
+
+                    if (posix_spawn(&child_pid, "/bin/addr2line", &action, NULL, args, NULL) == 0) {
+                        // Close the write end of the pipe in the parent process
+                        close(pipe_fd[1]);
+
+                        // Read the output from the pipe
+                        char buffer[4096];
+                        ssize_t bytes_read;
+                        while ((bytes_read = read(pipe_fd[0], buffer, sizeof(buffer))) > 0) {
+                            fwrite(buffer, 1, bytes_read, stdout);
+                        }
+
+                        // Wait for the child process to complete
+                        waitpid(child_pid, &status, 0);
+
+                        if (strstr(buffer, "0x") == NULL && strstr(buffer, "(nil)") == NULL && strstr(buffer, "(null)") == NULL) {
+                            if (strstr(buffer, "??") == NULL) {
+                                sprintf(cmd, "%p, %s", d->address, buffer);
                                 
                                 //address_line_mapping = (char *)calloc(strlen(address_line_mapping) + strlen(cmd) + 1, sizeof(char));
                                 //strcat(address_line_mapping, address_line_mapping_cur);
                                 strcat(address_line_mapping, cmd);
-                                //address_line_mapping_cur = address_line_mapping;
-
-                                //funcionou
-                                //printf("~~~~ <%s>\n", line);
-                                //sprintf(&final_core->log_hdr_p->posix_line_mapping[line_mappings_index++], "%s, %s", d->address, line);
-
-                                //final_core->log_hdr_p->posix_line_mapping[line_mappings_index++] = *address_line_mapping;
                             }
                         }
+
+                        /*if (WIFEXITED(status)) {
+                            printf("Command exited with status %d\n", WEXITSTATUS(status));
+                        } else {
+                            printf("Command did not exit normally\n");
+                        }*/
                     }
+
 
                     HASH_DEL(unique_mem_addr, d);
                 }
